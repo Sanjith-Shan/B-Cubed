@@ -25,6 +25,12 @@ RUN curl -L https://foundry.paradigm.xyz | bash \
     && /root/.foundry/bin/foundryup
 ENV PATH="/root/.foundry/bin:${PATH}"
 
+# Install forge-std (the test framework PoCs depend on). Pinned version,
+# committed to the image so the TEE doesn't need network access at runtime.
+RUN mkdir -p /app/lib \
+    && git clone --depth 1 --branch v1.16.1 \
+        https://github.com/foundry-rs/forge-std /app/lib/forge-std
+
 # Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
