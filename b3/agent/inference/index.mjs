@@ -54,6 +54,11 @@ function emit(obj) {
 }
 
 function buildProviderConfig() {
+  // As of 2026-05-12 the gateway only validates JWTs from the sepolia-dev
+  // KMS — both ai-gateway.eigencloud.xyz and ai-gateway-dev.eigencloud.xyz
+  // reject sepolia-prod/mainnet-alpha JWTs with `crypto/rsa: verification
+  // error`. We default to the dev gateway and deploy via the dev-tagged
+  // ecloud-cli so the pair lines up.
   const baseURL = process.env.EIGEN_GATEWAY_URL || "https://ai-gateway-dev.eigencloud.xyz";
   const jwt = process.env.KMS_AUTH_JWT || undefined;
   const kmsServerURL = process.env.KMS_SERVER_URL;
@@ -83,6 +88,18 @@ async function main() {
     });
     process.exit(3);
   }
+
+  // Diagnostic — log effective config to stderr so it lands in app logs.
+  process.stderr.write(
+    `[b3-inference] baseURL=${cfg.baseURL} attest=${!!cfg.attestConfig} jwt=${!!cfg.jwt} ` +
+    `KMS_SERVER_URL=${process.env.KMS_SERVER_URL || "(unset)"} ` +
+    `KMS_PUBLIC_KEY_set=${!!process.env.KMS_PUBLIC_KEY}\n`,
+  );
+
+  // The provider's `debug: true` mode writes to stdout, which collides with
+  // our JSON-on-stdout protocol. Force debug off here; users wanting verbose
+  // output should run the sidecar with DEBUG_PROVIDER_STDERR=1 instead.
+  cfg.debug = false;
 
   const gateway = createEigenGateway(cfg);
   const model = gateway(req.model);
