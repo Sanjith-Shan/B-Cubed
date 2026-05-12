@@ -43,6 +43,68 @@
 import { createEigenGateway } from "@layr-labs/ai-gateway-provider";
 import { generateText } from "ai";
 
+// OpenAI fallback (used when USE_OPENAI_FALLBACK=true). Bypasses the EigenAI
+// gateway entirely — keeps the same TEE attestation envelope, but the AI
+// inference itself comes from OpenAI's API. We re-enable the EigenAI path
+// (and lose this fallback) as soon as Eigen Labs fixes the gateway-KMS
+// keypair mismatch documented in Documents/eigencloud-ai-gateway-401-fix.md.
+async function callOpenAIDirect(req) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return { ok: false, error: "USE_OPENAI_FALLBACK is set but OPENAI_API_KEY is missing" };
+  }
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const body = {
+    model,
+    messages: req.messages,
+    ...(req.seed != null ? { seed: req.seed } : {}),
+    ...(req.temperature != null ? { temperature: req.temperature } : {}),
+    ...(req.max_tokens != null ? { max_tokens: req.max_tokens } : {}),
+  };
+  let resp;
+  try {
+    resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    return { ok: false, error: `openai network error: ${e?.message || String(e)}` };
+  }
+  const raw = await resp.text();
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: `openai non-JSON response (${resp.status}): ${raw.slice(0, 500)}` };
+  }
+  if (!resp.ok) {
+    return {
+      ok: false,
+      error: `openai error ${resp.status}: ${json?.error?.message || raw.slice(0, 500)}`,
+    };
+  }
+  const choice = json?.choices?.[0];
+  const text =
+    typeof choice?.message?.content === "string"
+      ? choice.message.content
+      : Array.isArray(choice?.message?.content)
+        ? choice.message.content.filter((p) => p?.type === "text").map((p) => p.text).join("")
+        : "";
+  return {
+    ok: true,
+    text,
+    model: json.model || model,
+    usage: json.usage || null,
+    request_body: body,
+    response_body: json,
+    response_headers: Object.fromEntries(resp.headers.entries()),
+  };
+}
+
 async function readStdin() {
   const chunks = [];
   for await (const c of process.stdin) chunks.push(c);
@@ -77,6 +139,17 @@ async function main() {
   } catch (e) {
     emit({ ok: false, error: `bad stdin json: ${e.message}` });
     process.exit(2);
+  }
+
+  // Short-circuit to the OpenAI fallback when explicitly enabled. Keeps the
+  // exact same stdout JSON contract so severity_assessor.py doesn't care
+  // which provider answered.
+  if (process.env.USE_OPENAI_FALLBACK === "true" || process.env.USE_OPENAI_FALLBACK === "1") {
+    process.stderr.write("[b3-inference] USE_OPENAI_FALLBACK=true — routing to OpenAI\n");
+    const out = await callOpenAIDirect(req);
+    emit(out);
+    if (!out.ok) process.exit(7);
+    return;
   }
 
   const cfg = buildProviderConfig();
